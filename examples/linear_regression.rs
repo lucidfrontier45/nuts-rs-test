@@ -3,6 +3,7 @@ use std::f64::consts::PI;
 use ndarray::{Array1, Array2, ArrayView1};
 use ndarray_rand::{
     RandomExt,
+    rand::Rng,
     rand_distr::{Normal, Uniform},
 };
 use nuts_rs::DiagGradNutsSettings;
@@ -46,6 +47,8 @@ impl ProbabilisticModel for LinearRegressionModel {
     }
 }
 
+// given one sample of w, predict y from the distribution
+// y ~ N(X * w, sigma^2)
 fn predict(w: &[f64], sigma: f64, x: &[f64], n_samples: usize) -> Array1<f64> {
     let mut rng = ndarray_rand::rand::thread_rng();
     let position = ArrayView1::from(w);
@@ -55,6 +58,8 @@ fn predict(w: &[f64], sigma: f64, x: &[f64], n_samples: usize) -> Array1<f64> {
     z + e
 }
 
+// given multiple samples of w, predict y from multiple distributions
+// y ~ 1/N sum_w N(X * w, sigma^2)
 fn posterior_predictive(ws: &Array2<f64>, sigma: f64, x: &[f64], n_samples: usize) -> Array1<f64> {
     let k = ws.shape()[0];
     let res = (0..k)
@@ -63,23 +68,22 @@ fn posterior_predictive(ws: &Array2<f64>, sigma: f64, x: &[f64], n_samples: usiz
     Array1::from_vec(res)
 }
 
+fn prepare_input<T: Rng>(n: usize, rng: &mut T) -> (Array2<f64>, Array1<f64>, f64, usize) {
+    let w = Array1::from_vec(vec![1.0, 2.0, 3.0]);
+    let d = w.len();
+    let x = Array2::random_using((n, d), Uniform::new(-2.0, 2.0), rng);
+    let sigma = 0.1;
+    let e = Array1::random_using(n, Normal::new(0.0, sigma).unwrap(), rng);
+    let y = x.dot(&w) + e;
+    (x, y, sigma, d)
+}
+
 fn main() {
     // current ndarray requires rand 0.8 rng
     let mut rng = ndarray_rand::rand::thread_rng();
     let n = 100;
 
-    let w = Array1::from_vec(vec![1.0, 2.0, 3.0]);
-    let d = w.len();
-    let sigma = 0.1;
-
-    // sample X from 3d uniform [-2.0, 2.0]
-    let x = Array2::random_using((n, d), Uniform::new(-2.0, 2.0), &mut rng);
-
-    // sample e from 1d normal(0, 1.5)
-    let e = Array1::random_using(n, Normal::new(0.0, sigma).unwrap(), &mut rng);
-
-    // construct y = X * w + e
-    let y = x.dot(&w) + e;
+    let (x, y, sigma, d) = prepare_input(n, &mut rng);
 
     // We get the default sampler arguments
     let mut settings = DiagGradNutsSettings::default();
@@ -88,17 +92,20 @@ fn main() {
     settings.num_tune = 1000;
     settings.maxdepth = 10;
 
-    // We instanciate our posterior density function
+    // create the model
     let model = LinearRegressionModel::new(x, y, sigma);
+    // draw posterior samples
     let trace = nutsrs_test::run_nuts(model, settings, &vec![0.0; d], 1000);
 
+    // analyze the posterior mean
     let w_mean = trace.mean_axis(ndarray::Axis(0)).unwrap();
     println!("Posterior mean: {:?}", w_mean);
+
+    // test posterior predictive
     let x_new = [2.5, -1.1, 0.3];
     let y_preds = posterior_predictive(&trace, sigma, &x_new, 1);
-
-    // 5%, 50%, 95% quantiles
     let mut y_preds = y_preds.to_vec();
+    // calculate the 5%, 50%, and 95% quantiles
     y_preds.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let q5 = y_preds[y_preds.len() * 10 / 100];
     let q50 = y_preds[y_preds.len() * 50 / 100];
